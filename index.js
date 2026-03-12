@@ -52,7 +52,7 @@ definitions = [
         id: "layers",
         name: "Layers",
         type: "number",
-        default: 12,
+        default: 24,
         options: {
             min: 6,
             max: 24,
@@ -158,6 +158,67 @@ linecolor={"Hex":"#4C4638", "Name":"Mocha"};
 
 //************* Draw the layers ************* 
 
+
+//vvvvvvvvvvvvvvv CLIPPER BOOLEAN ENGINE vvvvvvvvvvvvvvv
+var CLIP_SCALE = 100;   // Integer precision for Clipper (100 = 0.01 unit resolution)
+var CLIP_FLATTEN = 0.1; // Bezier-to-polygon tolerance (lower = smoother, more points)
+
+function _toClipperPaths(paperItem) {
+    var clone = paperItem.clone({ insert: false });
+    clone.flatten(CLIP_FLATTEN);
+    var children = (clone.className === 'CompoundPath') ? clone.children : [clone];
+    var result = [];
+    for (var i = 0; i < children.length; i++) {
+        var segs = children[i].segments;
+        if (segs.length < 3) continue;
+        var pts = new Array(segs.length);
+        for (var j = 0; j < segs.length; j++) {
+            pts[j] = { X: Math.round(segs[j].point.x * CLIP_SCALE),
+                       Y: Math.round(segs[j].point.y * CLIP_SCALE) };
+        }
+        result.push(pts);
+    }
+    clone.remove();
+    return result;
+}
+
+function _fromClipperPaths(clipperPaths) {
+    if (!clipperPaths || clipperPaths.length === 0) return new Path();
+    var compound = new CompoundPath({});
+    for (var i = 0; i < clipperPaths.length; i++) {
+        var pts = clipperPaths[i];
+        if (pts.length < 3) continue;
+        var paperPts = new Array(pts.length);
+        for (var j = 0; j < pts.length; j++) {
+            paperPts[j] = new Point(pts[j].X / CLIP_SCALE, pts[j].Y / CLIP_SCALE);
+        }
+        compound.addChild(new Path({ segments: paperPts, closed: true, insert: false }));
+    }
+    // Use non-zero winding — matches Paper.js canvas default and Clipper's output orientation.
+    // CleanPolygons removes near-degenerate edges that can cause winding flips at fine tolerances.
+    ClipperLib.Clipper.CleanPolygons(clipperPaths, 0.5);
+    compound.reorient(true, true);
+    return compound;
+}
+
+function _clipBool(a, b, clipType) {
+    var savedStyle = a.style;
+    var clipper = new ClipperLib.Clipper();
+    clipper.AddPaths(_toClipperPaths(a), ClipperLib.PolyType.ptSubject, true);
+    clipper.AddPaths(_toClipperPaths(b), ClipperLib.PolyType.ptClip, true);
+    var solution = new ClipperLib.Paths();
+    clipper.Execute(clipType, solution,
+        ClipperLib.PolyFillType.pftNonZero,
+        ClipperLib.PolyFillType.pftNonZero);
+    var result = _fromClipperPaths(solution);
+    result.style = savedStyle;
+    return result;
+}
+
+function clipUnite(a, b)     { return _clipBool(a, b, ClipperLib.ClipType.ctUnion); }
+function clipSubtract(a, b)  { return _clipBool(a, b, ClipperLib.ClipType.ctDifference); }
+function clipIntersect(a, b) { return _clipBool(a, b, ClipperLib.ClipType.ctIntersection); }
+//^^^^^^^^^^^^^ END CLIPPER BOOLEAN ENGINE ^^^^^^^^^^^^^
 
 sheet = []; //This will hold each layer
 
@@ -298,6 +359,12 @@ for (s=2;s<stacks-1;s++){
 
 console.log(scene.name);
 
+var features = {};
+var renderTime;
+
+(async () => {
+
+paper.view.autoUpdate = false;
 
 for (z = 0; z < stacks; z++) {
     px=0; py=0;pz=0;prange=1;
@@ -306,8 +373,8 @@ for (z = 0; z < stacks; z++) {
     
     //First we build a frame
     var outsideframe = new Path.Rectangle(new Point(0, 0),new Size(wide, high), framradius)
-    var insideframe = new Path.Rectangle(new Point(framewidth, framewidth),new Size(wide-framewidth*2, high-framewidth*2)) 
-    sheet[z] = outsideframe.subtract(insideframe);
+    var insideframe = new Path.Rectangle(new Point(framewidth, framewidth),new Size(wide-framewidth*2, high-framewidth*2))
+    sheet[z] = clipSubtract(outsideframe, insideframe);
     outsideframe.remove();insideframe.remove();
 
     
@@ -328,14 +395,16 @@ for (z = 0; z < stacks; z++) {
         var group = new Group(sheet[z]);
         
         console.log(z)//Show layer completed in console
-    
+        paper.view.update();
+        await new Promise(resolve => setTimeout(resolve, 0));
+
 }//end z loop
 
 //--------- Finish up the preview ----------------------- 
 
     // Build the features and trigger an fxhash preview
-    var features = {};
-    features.Size =  ~~(wide/100/ratio)+" x "+~~(high/100/ratio)+" inches";
+    features = {};
+    features.Size = ~~(wide/100/ratio)+" x "+~~(high/100/ratio)+" inches";
     features.Width = ~~(wide/100/ratio);
     features.Height = ~~(high/100/ratio);
     features.Depth = stacks*0.0625;
@@ -347,80 +416,103 @@ for (z = 0; z < stacks; z++) {
     console.log(features);
     $fx.features(features);
 
-     //send to studio.shawnkemp.art
-     if(new URLSearchParams(window.location.search).get('skart')){sendAllExports()}; 
-
-    async function sendAllExports() {
-       paper.view.update();
-       await sendCanvasToBubbleAPI(myCanvas, $fx.hash);
-       await sendSVGToBubbleAPI($fx.hash);
-       // send colors
-       var content = JSON.stringify(features,null,2);
-       await sendTextToBubbleAPI("Colors-"+$fx.hash, content)
-       // 2. Add frame
-       floatingframe();
-       paper.view.update();
-       // 3. Framed PNGs (Black, White, Walnut, Maple)
-       var frameOptions = [
-           { name: "Black", hex: "#1f1f1f" },
-           { name: "White", hex: "#f9f9f9" },
-           { name: "Walnut", hex: "#60513D" },
-           { name: "Maple", hex: "#ebd9c0" }
-       ];
-       for (var i = 0; i < frameOptions.length; i++) {
-           woodframe.style = { fillColor: frameOptions[i].hex };
-           var fileName = "Framed" + frameOptions[i].name + "-" + $fx.hash;
-           paper.view.update();
-           await sendCanvasToBubbleAPI(myCanvas, fileName);
-       }
-       // 4. Remove frame
-       floatingframe();
-       // 5. Blueprint SVG
-       for (var z = 0; z < stacks; z++) {
-           sheet[z].style = {
-               fillColor: null,
-               strokeWidth: 0.1,
-               strokeColor: lightburn[stacks - z - 1].Hex,
-               shadowColor: null,
-               shadowBlur: null,
-               shadowOffset: null
-           };
-           sheet[z].selected = true;
-       }
-       paper.view.update();
-       await sendSVGToBubbleAPI("Blueprint-" + $fx.hash);
-       // 6. Plotting SVG
-       for (var z = 0; z < stacks; z++) {
-           sheet[z].style = {
-               fillColor: null,
-               strokeWidth: 0.1,
-               strokeColor: plottingColors[stacks - z - 1].Hex,
-               shadowColor: null,
-               shadowBlur: null,
-               shadowOffset: null
-           };
-           sheet[z].selected = true;
-       }
-       for (var z = 0; z < stacks; z++) {
-           if (z < stacks - 1) {
-               for (var zs = z + 1; zs < stacks; zs++) {
-                   sheet[z] = sheet[z].subtract(sheet[zs]);
-                   sheet[z].previousSibling.remove();
-               }
-           }
-       }
-       paper.view.update();
-       await sendSVGToBubbleAPI("Plotting-" + $fx.hash);
-       sendFeaturesAPI(features);
-       console.log("All exports sent!");
-   }
+ //Begin send to studio.shawnkemp.art **************************************************************
+     studioAPI.setApiBase('https://studio-shawnkemp-art.vercel.app');
+     if(new URLSearchParams(window.location.search).get('skart')){sendAllExports()};
+//End send to studio.shawnkemp.art **************************************************************
 
       var finalTime = new Date().getTime();
-    var renderTime = (finalTime - initialTime)/1000
+    renderTime = (finalTime - initialTime)/1000
     console.log ('Render took : ' +  renderTime.toFixed(2) + ' seconds' );
 
+    paper.view.autoUpdate = true;
+    paper.view.update();
 
-        async function refreshit() {
+})();
+
+async function sendAllExports() {
+
+        paper.view.update();
+        // Send canvas as PNG
+        await studioAPI.sendCanvas(myCanvas, $fx.hash, $fx.hash+".png");
+
+        // Send SVG
+        await studioAPI.sendSVG(project.exportSVG({asString: true}), $fx.hash, $fx.hash+".svg");
+
+        // send colors
+        var content = JSON.stringify(features,null,2);
+
+        // Send text/JSON
+        await studioAPI.sendText(JSON.stringify(colors), $fx.hash, "Colors-"+$fx.hash+".json");
+
+        // 2. Add frame
+        floatingframe();
+        paper.view.update();
+        // 3. Framed PNGs (Black, White, Walnut, Maple)
+        var frameOptions = [
+            { name: "Black", hex: "#1f1f1f" },
+            { name: "White", hex: "#f9f9f9" },
+            { name: "Walnut", hex: "#60513D" },
+            { name: "Maple", hex: "#ebd9c0" }
+        ];
+        for (var i = 0; i < frameOptions.length; i++) {
+            woodframe.style = { fillColor: frameOptions[i].hex };
+            var fileName = "Framed" + frameOptions[i].name + "-" + $fx.hash;
+            paper.view.update();
+
+            await studioAPI.sendCanvas(myCanvas,  $fx.hash, fileName+".png");
+        }
+        // 4. Remove frame
+        floatingframe();
+        // 5. Blueprint SVG
+        for (var z = 0; z < stacks; z++) {
+            sheet[z].style = {
+                fillColor: null,
+                strokeWidth: 0.1,
+                strokeColor: lightburn[stacks - z - 1].Hex,
+                shadowColor: null,
+                shadowBlur: null,
+                shadowOffset: null
+            };
+            sheet[z].selected = true;
+        }
+        paper.view.update();
+
+        // Send SVG
+        await studioAPI.sendSVG(project.exportSVG({asString: true}), $fx.hash, "Blueprint-" + $fx.hash+".svg");
+        // 6. Plotting SVG
+        for (var z = 0; z < stacks; z++) {
+            sheet[z].style = {
+                fillColor: null,
+                strokeWidth: 0.1,
+                strokeColor: plottingColors[stacks - z - 1].Hex,
+                shadowColor: null,
+                shadowBlur: null,
+                shadowOffset: null
+            };
+            sheet[z].selected = true;
+        }
+        for (var z = 0; z < stacks; z++) {
+            if (z < stacks - 1) {
+                for (var zs = z + 1; zs < stacks; zs++) {
+                    var _old = sheet[z];
+                    sheet[z] = clipSubtract(_old, sheet[zs]);
+                    _old.remove();
+                }
+            }
+        }
+        paper.view.update();
+        // Send SVG
+        await studioAPI.sendSVG(project.exportSVG({asString: true}), $fx.hash, "Plotting-" + $fx.hash+".svg");
+
+        // Send features
+        await studioAPI.sendFeatures($fx.hash, features);
+
+        console.log("All exports sent!");
+        studioAPI.signalComplete();
+    }
+
+async function refreshit() {
         await new Promise(resolve => setTimeout(resolve, 5000)); // 3 sec
         canvas.toBlob(function(blob) {saveAs(blob, tokenData.hash+' - '+renderTime.toFixed(0)+'secs.png');});
         await new Promise(resolve => setTimeout(resolve, 5000)); // 3 sec
@@ -431,20 +523,22 @@ for (z = 0; z < stacks; z++) {
  
 function sun(z) {
     var sun = new Path.Circle(orbCenter, orbSize);
-    sheet[z] = sheet[z].subtract(sun);
+    var _old = sheet[z];
+    sheet[z] = clipSubtract(_old, sun);
     sun.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();    
+    _old.remove();
  }
 
  function moon(z) {
     var moonfull = new Path.Circle(orbCenter, orbSize);
     var cut = new Path.Circle(orbCenter+[R.random_dec()*(orbSize/2)+framewidth,0], orbSize);
-    orb = moonfull.subtract(cut);
+    orb = clipSubtract(moonfull, cut);
     cut.remove();moonfull.remove();
-    project.activeLayer.children[project.activeLayer.children.length-1].remove();  
     orb.rotate(R.random_dec()*90);
-    sheet[z] = sheet[z].subtract(orb); 
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();  
+    var _old = sheet[z];
+    sheet[z] = clipSubtract(_old, orb);
+    orb.remove();
+    _old.remove();
  }
 
 
@@ -453,9 +547,10 @@ function stars(z){
         center = new Point(R.random_dec()*wide, R.random_dec()*high);
         var star = new Path.Star(center, 6, 8, 16);
         star.rotate(R.random_dec()*90);
-        sheet[z] = sheet[z].subtract(star);
+        var _old = sheet[z];
+        sheet[z] = clipSubtract(_old, star);
         star.remove();
-        project.activeLayer.children[project.activeLayer.children.length-2].remove(); 
+        _old.remove();
     }
 
 }
@@ -474,9 +569,10 @@ function stars(z){
         ray.add(rs+[noise.get(r)*wide,noise.get(r)*30]);
         ray.add(rs+[0,2]);
         ray.rotate(r,orbCenter);
-        sheet[zTo] = sheet[zTo].subtract(ray);
+        var _old = sheet[zTo];
+        sheet[zTo] = clipSubtract(_old, ray);
         ray.remove();
-        project.activeLayer.children[project.activeLayer.children.length-2].remove();
+        _old.remove();
         frameIt(z);
     }
     
@@ -488,9 +584,10 @@ function clouds(z) {
     var cloudCenter = new Point(c,Math.floor(R.random_dec()*100))
     var cloudSize = Math.floor(25+R.random_dec()*100)
     var cloud = new Path.Circle(cloudCenter, cloudSize);
-    sheet[z] = sheet[z].unite(cloud);
+    var _old = sheet[z];
+    sheet[z] = clipUnite(_old, cloud);
     cloud.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove(); 
+    _old.remove();
     colors[z]= cloudColors[Math.floor(R.random_dec()*cloudColors.length)];
  }
  }
@@ -530,9 +627,10 @@ function clouds(z) {
         path.add(mpoint);
         mpoint = new Point(0,start)
         path.add(mpoint);    
-    sheet[zTo] = sheet[zTo].unite(path);
+    var _old = sheet[zTo];
+    sheet[zTo] = clipUnite(_old, path);
     path.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _old.remove();
     colors[z]= waterColors[Math.floor(noise.get(z)*waterColors.length)];
  
  }
@@ -565,9 +663,10 @@ function clouds(z) {
         path.add(mpoint);
         mpoint = new Point(0,start)
         path.add(mpoint);             
-    sheet[zTo] = sheet[zTo].unite(path);
+    var _old = sheet[zTo];
+    sheet[zTo] = clipUnite(_old, path);
     path.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _old.remove();
     colors[z]= plainColors[Math.floor(noise.get(z)*plainColors.length)];
  }
 
@@ -599,9 +698,10 @@ function fields(z,zTo) {
         path.add(mpoint);
         mpoint = new Point(0,start)
         path.add(mpoint);      
-    sheet[zTo] = sheet[zTo].unite(path);
+    var _old = sheet[zTo];
+    sheet[zTo] = clipUnite(_old, path);
     path.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _old.remove();
     colors[z]= fieldColors[Math.floor(noise.get(z)*fieldColors.length)];
  }
 
@@ -636,9 +736,10 @@ function fields(z,zTo) {
         path.add(mpoint);
         mpoint = new Point(0,start)
         path.add(mpoint);     
-    sheet[zTo] = sheet[zTo].unite(path);
+    var _old = sheet[zTo];
+    sheet[zTo] = clipUnite(_old, path);
     path.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _old.remove();
     colors[z]= beachColors[Math.floor(noise.get(z)*beachColors.length)];
  }
 
@@ -675,9 +776,10 @@ function hills(z,zTo) {
         path.add(mpoint);
         mpoint = new Point(0,start)
         path.add(mpoint);  
-    sheet[zTo] = sheet[zTo].unite(path);
+    var _old = sheet[zTo];
+    sheet[zTo] = clipUnite(_old, path);
     path.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _old.remove();
     colors[z]= hillColors[Math.floor(noise.get(z)*hillColors.length)];
  }
 
@@ -707,9 +809,10 @@ function hills(z,zTo) {
         path.add(mpoint);
         mpoint = new Point(0,high)
         path.add(mpoint);
-    sheet[zTo] = sheet[zTo].unite(path);
+    var _old = sheet[zTo];
+    sheet[zTo] = clipUnite(_old, path);
     path.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _old.remove();
     colors[z]= mountainColors[Math.floor(R.random_dec()*mountainColors.length)];
  }
 
@@ -726,9 +829,10 @@ function hills(z,zTo) {
         var tree = new Path.RegularPolygon(center, sides, radius);
         //tree.scale(R.random_dec()*.8+.25, R.random_dec()+.5)
         tree.scale(1, R.random_dec()*2+5)
-        sheet[z]=sheet[z].unite(tree);
+        var _old = sheet[z];
+        sheet[z] = clipUnite(_old, tree);
         tree.remove();
-        project.activeLayer.children[project.activeLayer.children.length-2].remove();
+        _old.remove();
     }
     colors[z]= treeColors[Math.floor(R.random_dec()*treeColors.length)];
 
@@ -747,9 +851,10 @@ function hills(z,zTo) {
         var rock = new Path.RegularPolygon(center, sides, radius);
         //tree.scale(R.random_dec()*.8+.25, R.random_dec()+.5)
         //tree.scale(1, R.random_dec()*2+5)
-        sheet[z]=sheet[z].unite(rock);
+        var _old = sheet[z];
+        sheet[z] = clipUnite(_old, rock);
         rock.remove();
-        project.activeLayer.children[project.activeLayer.children.length-2].remove();
+        _old.remove();
     }
      colors[z]= rockColors[Math.floor(R.random_dec()*rockColors.length)];
  }
@@ -768,9 +873,10 @@ function hills(z,zTo) {
         var tree = new Path.RegularPolygon(center, sides, radius);
         //tree.scale(R.random_dec()*.8+.25, R.random_dec()+.5)
         tree.scale(.5, R.random_dec()*2+5)
-        sheet[z]=sheet[z].unite(tree);
+        var _old = sheet[z];
+        sheet[z] = clipUnite(_old, tree);
         tree.remove();
-        project.activeLayer.children[project.activeLayer.children.length-2].remove();
+        _old.remove();
     }
     colors[z]= oboliskColors[Math.floor(R.random_dec()*oboliskColors.length)];
 
@@ -784,27 +890,31 @@ function hills(z,zTo) {
     var center = new Point(xpos, layerLines[z+1]); 
     var boat = new Path.Circle(center,radius);
     var path = new Path.Rectangle(new Point(xpos-radius,layerLines[z+1]-radius*2),radius*2 )
-    boat = boat.subtract(path)
+    var _oldBoat = boat;
+    boat = clipSubtract(_oldBoat, path);
     path.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _oldBoat.remove();
     path = new Path.Rectangle(center,new Size(20, radius))
     path.position.y += -radius*.75
     path.position.x += -10
-    boat = boat.unite(path)
+    var _oldBoat2 = boat;
+    boat = clipUnite(_oldBoat2, path);
     path.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _oldBoat2.remove();
     var sides = 3;
     //var radius = 5*z+50;
     var path = new Path.RegularPolygon(center, sides, radius);
     path.position.y +=-radius*.80
-    boat = boat.unite(path)
+    var _oldBoat3 = boat;
+    boat = clipUnite(_oldBoat3, path);
     path.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _oldBoat3.remove();
     boat.position.y += -radius/3
     boat.rotate(15-Math.floor(R.random_dec()*30))
-    sheet[z]=sheet[z].unite(boat);
+    var _old = sheet[z];
+    sheet[z] = clipUnite(_old, boat);
     boat.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _old.remove();
     colors[z]={"Hex":"#292831","Name":"Black"}
  }
 
@@ -821,7 +931,7 @@ function floatingframe(){
   if (framegap.isEmpty()){
         var outsideframe = new Path.Rectangle(new Point(0, 0),new Size(~~(wide+frameReveal*2), ~~(high+frameReveal*2)), framradius)
         var insideframe = new Path.Rectangle(new Point(frameReveal, frameReveal),new Size(wide, high)) 
-        framegap = outsideframe.subtract(insideframe);
+        framegap = clipSubtract(outsideframe, insideframe);
         outsideframe.remove();insideframe.remove();
         framegap.scale(2.2);
         framegap.position = new Point(paper.view.viewSize.width/2, paper.view.viewSize.height/2);
@@ -831,7 +941,7 @@ function floatingframe(){
     if (woodframe.isEmpty()){
         var outsideframe = new Path.Rectangle(new Point(0, 0),new Size(wide+frameWide*2+frameReveal*2, high+frameWide*2+frameReveal*2), framradius)
         var insideframe = new Path.Rectangle(new Point(frameWide, frameWide),new Size(wide+frameReveal*2, high+frameReveal*2)) 
-        woodframe = outsideframe.subtract(insideframe);
+        woodframe = clipSubtract(outsideframe, insideframe);
         outsideframe.remove();insideframe.remove();
         woodframe.scale(2.2);
         woodframe.position = new Point(paper.view.viewSize.width/2, paper.view.viewSize.height/2);
@@ -849,22 +959,24 @@ function rangeInt(range,x,y,z){
 
 // Add shape s to sheet z
 function join(z,s){
-    sheet[z] = (s.unite(sheet[z]));
+    var _old = sheet[z];
+    sheet[z] = clipUnite(s, _old);
     s.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _old.remove();
 }
 
 // Subtract shape s from sheet z
 function cut(z,s){
-    sheet[z] = sheet[z].subtract(s);
+    var _old = sheet[z];
+    sheet[z] = clipSubtract(_old, s);
     s.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _old.remove();
 }
 
 function drawFrame(z){
     var outsideframe = new Path.Rectangle(new Point(0, 0),new Size(wide, high), framradius)
-    var insideframe = new Path.Rectangle(new Point(framewidth, framewidth),new Size(wide-framewidth*2, high-framewidth*2)) 
-    sheet[z] = outsideframe.subtract(insideframe);
+    var insideframe = new Path.Rectangle(new Point(framewidth, framewidth),new Size(wide-framewidth*2, high-framewidth*2))
+    sheet[z] = clipSubtract(outsideframe, insideframe);
     outsideframe.remove();insideframe.remove();
 }
 
@@ -872,9 +984,10 @@ function drawFrame(z){
 function solid(z){ 
     outsideframe = new Path.Rectangle(new Point(1,1),new Size(wide-1, high-1), framradius)
     //outsideframe = new Path.Circle(new Point(wide/2),wide/2)
-    sheet[z] = sheet[z].unite(outsideframe);
+    var _old = sheet[z];
+    sheet[z] = clipUnite(_old, outsideframe);
     outsideframe.remove();
-    project.activeLayer.children[project.activeLayer.children.length-2].remove();
+    _old.remove();
 }
 
 
@@ -883,19 +996,21 @@ function frameIt(z){
         //Trim to size
         var outsideframe = new Path.Rectangle(new Point(0, 0),new Size(wide, high), framradius)
         //var outsideframe = new Path.Circle(new Point(wide/2, wide/2),wide/2);
-        sheet[z] = outsideframe.intersect(sheet[z]);
+        var _old = sheet[z];
+        sheet[z] = clipIntersect(outsideframe, _old);
         outsideframe.remove();
-        project.activeLayer.children[project.activeLayer.children.length-2].remove();
+        _old.remove();
 
         //Make sure there is still a solid frame
         var outsideframe = new Path.Rectangle(new Point(0, 0),new Size(wide, high), framradius)
         var insideframe = new Path.Rectangle(new Point(framewidth, framewidth),new Size(wide-framewidth*2, high-framewidth*2)) 
 
-        var frame = outsideframe.subtract(insideframe);
+        var frame = clipSubtract(outsideframe, insideframe);
         outsideframe.remove();insideframe.remove();
-        sheet[z] = sheet[z].unite(frame);
+        var _old2 = sheet[z];
+        sheet[z] = clipUnite(_old2, frame);
         frame.remove();
-        project.activeLayer.children[project.activeLayer.children.length-2].remove();
+        _old2.remove();
          
         sheet[z].style = {fillColor: colors[z].Hex, strokeColor: linecolor.Hex, strokeWidth: 1*ratio,shadowColor: new Color(0,0,0,[0.3]),shadowBlur: 20,shadowOffset: new Point((stacks-z)*2.3, (stacks-z)*2.3)};
 }
@@ -1016,8 +1131,9 @@ document.addEventListener('keypress', (event) => {
             for (z=0;z<stacks;z++){
                 if (z<stacks-1){
                     for (zs=z+1;zs<stacks;zs++){
-                        sheet[z] = sheet[z].subtract(sheet[zs]);
-                        sheet[z].previousSibling.remove();
+                        var _old = sheet[z];
+                        sheet[z] = clipSubtract(_old, sheet[zs]);
+                        _old.remove();
                     }
                 } 
                 console.log("optimizing")

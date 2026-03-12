@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm pack:*)",
+      "Bash(tar -xzf clipper-lib-6.4.2.tgz)",
+      "Bash(cp package/clipper.js ./clipper.js)",
+      "Bash(rm -rf package clipper-lib-6.4.2.tgz)"
+    ]
+  }
+}
