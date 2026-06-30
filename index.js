@@ -366,6 +366,12 @@ var renderTime;
 
 paper.view.autoUpdate = false;
 
+// Warm-up: force paper.js to yield/render once before the first real Clipper
+// boolean op, otherwise the very first clip*() silently returns empty and the
+// bottom layer's frame comes out blank (artwork renders one layer short).
+paper.view.update();
+await new Promise(resolve => setTimeout(resolve, 0));
+
 for (z = 0; z < stacks; z++) {
     px=0; py=0;pz=0;prange=1;
     
